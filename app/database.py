@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     current_result_version INTEGER,
     last_error_code TEXT NOT NULL DEFAULT '',
     last_error_message TEXT NOT NULL DEFAULT '',
+    published_release_id INTEGER,
     version INTEGER NOT NULL DEFAULT 1,
     started_at TEXT,
     finished_at TEXT,
@@ -293,6 +294,45 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+CREATE TABLE IF NOT EXISTS compute_result_releases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    result_id INTEGER NOT NULL REFERENCES compute_results(id) ON DELETE RESTRICT,
+    sequence INTEGER NOT NULL,
+    scorer_code TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('candidate','in_review','approved','published','rejected','revoked','superseded')),
+    computed_by TEXT NOT NULL DEFAULT '',
+    submitted_by TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    review_started_by TEXT NOT NULL DEFAULT '',
+    review_started_at TEXT,
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    reviewed_at TEXT,
+    review_note TEXT NOT NULL DEFAULT '',
+    published_by TEXT NOT NULL DEFAULT '',
+    published_at TEXT,
+    revoked_by TEXT NOT NULL DEFAULT '',
+    revoked_at TEXT,
+    revoke_reason TEXT NOT NULL DEFAULT '',
+    superseded_by_release_id INTEGER REFERENCES compute_result_releases(id),
+    UNIQUE(task_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_compute_releases_task ON compute_result_releases(task_id,sequence);
+CREATE INDEX IF NOT EXISTS idx_compute_releases_status ON compute_result_releases(task_id,status);
+CREATE TABLE IF NOT EXISTS compute_result_release_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id INTEGER NOT NULL REFERENCES compute_result_releases(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK(action IN ('submit','start_review','approve','reject','publish','revoke','reinstate','supersede')),
+    actor TEXT NOT NULL,
+    actor_user_id INTEGER,
+    note TEXT NOT NULL DEFAULT '',
+    before_json TEXT NOT NULL DEFAULT '{}',
+    after_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_release_events_release ON compute_result_release_events(release_id,id);
+CREATE INDEX IF NOT EXISTS idx_compute_release_events_task ON compute_result_release_events(task_id,id);
 '''
 
 PERMISSIONS = [
@@ -311,6 +351,9 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("compute.review", "复核成绩结果", "compute_results", "review"),
+    ("compute.publish", "发布成绩结果", "compute_results", "publish"),
+    ("compute.revoke", "撤销已发布成绩", "compute_results", "revoke"),
 ]
 
 
@@ -359,10 +402,22 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _ensure_column(
+            connection,
+            "compute_tasks",
+            "published_release_id",
+            "INTEGER",
+        )
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
-from app.compute.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
+from app.api.dependencies import current_principal
+from app.compute.releases import ResultReleaseService
+from app.compute.schemas import (
+    BatchOperation, CancelRequest, CandidateSubmit, PriorityRequest, QuotaSet,
+    RetryRequest, ReviewNote, RevokeRequest, OptionalReviewNote, TaskClaim,
+    TaskFailure, TaskRescore, TaskResult, TaskSubmit, TemplateCreate,
+)
 from app.compute.service import ComputeOperationsService
+from app.core.security import Principal
 
 router = APIRouter(prefix="/api/compute", tags=["科学计算任务运营"])
 
 
 def service() -> ComputeOperationsService:
     return ComputeOperationsService()
+
+
+def release_service() -> ResultReleaseService:
+    return ResultReleaseService()
 
 
 @router.get("/templates")
@@ -62,6 +73,11 @@ def fail_task(task_id: int, payload: TaskFailure):
     return service().fail(task_id, payload.worker_id, payload.error_code, payload.message, payload.retryable)
 
 
+@router.post("/tasks/{task_id}/rescore")
+def rescore_task(task_id: int, payload: TaskRescore):
+    return service().rescore(task_id, payload.worker_id, payload.scorer_code, payload.result, payload.metrics)
+
+
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(task_id: int, payload: CancelRequest):
     return service().cancel(task_id, payload.actor, payload.reason)
@@ -90,3 +106,47 @@ def recover_expired(actor: str = Query(default="recovery-worker", min_length=1))
 @router.get("/summary")
 def summary():
     return service().summary()
+
+
+# -- 成绩结果候选、复核、发布与撤销 -----------------------------------------
+
+
+@router.post("/tasks/{task_id}/releases", status_code=201)
+def submit_candidate(task_id: int, payload: CandidateSubmit, principal: Principal = Depends(current_principal)):
+    return release_service().submit_candidate(task_id, payload.model_dump(), principal)
+
+
+@router.get("/tasks/{task_id}/releases")
+def release_overview(task_id: int, principal: Principal = Depends(current_principal)):
+    return release_service().overview(task_id)
+
+
+@router.get("/tasks/{task_id}/releases/compare")
+def compare_releases(task_id: int, base: int = Query(..., ge=1), target: int = Query(..., ge=1),
+                     principal: Principal = Depends(current_principal)):
+    return release_service().compare(task_id, base, target)
+
+
+@router.post("/releases/{release_id}/review-start")
+def start_release_review(release_id: int, payload: OptionalReviewNote, principal: Principal = Depends(current_principal)):
+    return release_service().start_review(release_id, principal, payload.note)
+
+
+@router.post("/releases/{release_id}/approve")
+def approve_release(release_id: int, payload: ReviewNote, principal: Principal = Depends(current_principal)):
+    return release_service().approve(release_id, principal, payload.note)
+
+
+@router.post("/releases/{release_id}/reject")
+def reject_release(release_id: int, payload: ReviewNote, principal: Principal = Depends(current_principal)):
+    return release_service().reject(release_id, principal, payload.note)
+
+
+@router.post("/releases/{release_id}/publish")
+def publish_release(release_id: int, payload: ReviewNote, principal: Principal = Depends(current_principal)):
+    return release_service().publish(release_id, principal, payload.note)
+
+
+@router.post("/releases/{release_id}/revoke")
+def revoke_release(release_id: int, payload: RevokeRequest, principal: Principal = Depends(current_principal)):
+    return release_service().revoke(release_id, principal, payload.reason)

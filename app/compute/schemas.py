@@ -51,6 +51,13 @@ class TaskFailure(BaseModel):
     retryable: bool = True
 
 
+class TaskRescore(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=120)
+    scorer_code: str = Field(min_length=1, max_length=120)
+    result: dict[str, Any]
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
 class CancelRequest(BaseModel):
     actor: str = Field(min_length=1, max_length=120)
     reason: str = Field(min_length=2, max_length=1000)
@@ -80,3 +87,21 @@ class BatchOperation(BaseModel):
         if self.operation == "priority" and self.priority is None:
             raise ValueError("批量调整优先级时必须提供 priority")
         return self
+
+
+class CandidateSubmit(BaseModel):
+    result_version: int = Field(ge=1)
+    scorer_code: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=1000)
+
+
+class ReviewNote(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class OptionalReviewNote(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
+class RevokeRequest(BaseModel):
+    reason: str = Field(min_length=2, max_length=2000)

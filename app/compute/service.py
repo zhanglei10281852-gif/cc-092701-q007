@@ -80,7 +80,14 @@ class ComputeOperationsService:
         result = dict(row)
         result["results"] = self.repository.result_versions(task_id)
         result["interventions"] = self.repository.interventions(task_id)
+        result["release_overview"] = self._release_overview(task_id)
         return result
+
+    @staticmethod
+    def _release_overview(task_id: int) -> dict[str, Any] | None:
+        from app.compute.releases import ResultReleaseService
+
+        return ResultReleaseService().overview(task_id)
 
     def claim(self, worker_id: str, capabilities: list[str], lease_seconds: int) -> dict[str, Any] | None:
         now_value = self.clock.now()
@@ -130,6 +137,30 @@ class ComputeOperationsService:
                 "UPDATE compute_tasks SET status='succeeded',current_result_version=?,lease_owner='',lease_expires_at='',finished_at=?,updated_at=?,version=version+1 WHERE id=?",
                 (version, now, now, task_id),
             )
+            return dict(repository.task_by_id(task_id))
+
+    def rescore(self, task_id: int, worker_id: str, scorer_code: str, result: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+        """换一套评分器对同一批考试重新评分，追加一个新的结果版本。"""
+        now = to_storage(self.clock.now())
+        with transaction(immediate=True) as connection:
+            repository = ComputeRepository(connection)
+            task = repository.task_by_id(task_id)
+            if task is None:
+                raise NotFoundError("计算任务不存在")
+            if task["status"] != "succeeded":
+                raise ConflictError("只有已成功的任务可以换评分器重新评分")
+            version = int(connection.execute("SELECT COALESCE(MAX(version),0)+1 FROM compute_results WHERE task_id=?", (task_id,)).fetchone()[0])
+            connection.execute(
+                "INSERT INTO compute_results(task_id,version,result_json,metrics_json,result_digest,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                (task_id, version, json.dumps(result, ensure_ascii=False, sort_keys=True), json.dumps(metrics, ensure_ascii=False, sort_keys=True), digest({"scorer": scorer_code, "result": result, "metrics": metrics}), worker_id, now),
+            )
+            connection.execute(
+                "UPDATE compute_tasks SET current_result_version=?,updated_at=?,version=version+1 WHERE id=?",
+                (version, now, task_id),
+            )
+            repository.add_intervention(task_id=task_id, actor=worker_id, action="rescore",
+                                        reason=f"评分器 {scorer_code} 重新评分", before={"current_result_version": task["current_result_version"]},
+                                        after={"current_result_version": version}, batch_key="", now=now)
             return dict(repository.task_by_id(task_id))
 
     def fail(self, task_id: int, worker_id: str, error_code: str, message: str, retryable: bool) -> dict[str, Any]:
