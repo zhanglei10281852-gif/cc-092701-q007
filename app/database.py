@@ -293,6 +293,68 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+
+CREATE TABLE IF NOT EXISTS grading_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    latest_candidate_id INTEGER,
+    published_candidate_id INTEGER,
+    publication_seq INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS grading_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES grading_batches(id) ON DELETE RESTRICT,
+    scorer_code TEXT NOT NULL,
+    scorer_name TEXT NOT NULL DEFAULT '',
+    scores_json TEXT NOT NULL,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    scores_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('candidate','reviewed','rejected','published','superseded','revoked')),
+    computed_by_id INTEGER NOT NULL REFERENCES users(id),
+    computed_by TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    review_note TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    reviewed_at TEXT,
+    published_by TEXT NOT NULL DEFAULT '',
+    published_at TEXT,
+    revoked_by TEXT NOT NULL DEFAULT '',
+    revoked_at TEXT,
+    revoke_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_grading_candidates_batch ON grading_candidates(batch_id,id);
+CREATE TABLE IF NOT EXISTS grading_publications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES grading_batches(id) ON DELETE RESTRICT,
+    seq INTEGER NOT NULL,
+    candidate_id INTEGER NOT NULL REFERENCES grading_candidates(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK(kind IN ('publish','rollback')),
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    source_seq INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE(batch_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_grading_publications_batch ON grading_publications(batch_id,seq);
+CREATE TABLE IF NOT EXISTS grading_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES grading_batches(id) ON DELETE CASCADE,
+    candidate_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    from_status TEXT NOT NULL DEFAULT '',
+    to_status TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_grading_transitions_batch ON grading_transitions(batch_id,id);
+CREATE INDEX IF NOT EXISTS idx_grading_transitions_candidate ON grading_transitions(candidate_id,id);
 '''
 
 PERMISSIONS = [
@@ -311,6 +373,9 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("grades.compute", "提交成绩候选", "grades", "compute"),
+    ("grades.review", "复核成绩候选", "grades", "review"),
+    ("grades.publish", "发布与撤销成绩", "grades", "publish"),
 ]
 
 
@@ -380,11 +445,30 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO roles(code,name,description,is_system,created_at,updated_at) VALUES('auditor','审计查看员','只读查看业务与审计记录',1,?,?)",
             (now, now),
         )
+        connection.execute(
+            "INSERT OR IGNORE INTO roles(code,name,description,is_system,created_at,updated_at) VALUES('scorer','成绩评分员','可提交评分器计算的成绩候选',1,?,?)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO roles(code,name,description,is_system,created_at,updated_at) VALUES('grades_director','教务主任','可复核、发布与撤销成绩',1,?,?)",
+            (now, now),
+        )
         administrator = connection.execute("SELECT id FROM roles WHERE code='administrator'").fetchone()[0]
         connection.execute(
             "INSERT OR IGNORE INTO role_permissions(role_id,permission_id,granted_at) SELECT ?,id,? FROM permissions",
             (administrator, now),
         )
+        for role_code, permission_codes in (
+            ("scorer", ["grades.compute"]),
+            ("grades_director", ["grades.review", "grades.publish"]),
+        ):
+            connection.execute(
+                "INSERT OR IGNORE INTO role_permissions(role_id,permission_id,granted_at) "
+                "SELECT r.id,p.id,? FROM roles r JOIN permissions p ON p.code IN ("
+                + ",".join("?" for _ in permission_codes)
+                + ") WHERE r.code=?",
+                (now, *permission_codes, role_code),
+            )
 
 
 def migrate_db() -> None:
